@@ -6,7 +6,7 @@ def converting_date(df):
     
     llm = Gemini(
         model="models/gemini-1.5-flash",
-        api_key="AIzaSyDQqajAGpdTkAuM1DCzQsCcbcUL7Mz__h0",  # uses GOOGLE_API_KEY env var by default
+        api_key=API_key,  # uses GOOGLE_API_KEY env var by default
     )
     columns = df.columns    
     Prompt = f"""
