@@ -1,7 +1,6 @@
 import os
 import pandas as pd
 import numpy as np
-
 import matplotlib.pyplot as plt
 from pmdarima import auto_arima
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -44,64 +43,6 @@ def tune_xgboost(X_train, y_train):
 
     grid_search.fit(X_train, y_train)
     return grid_search.best_estimator_, grid_search.best_params_
-
-def identify_consistent_patterns(data):
-    """
-    Identify patterns that consistently occur every year during the same period.
-    """
-    historical_data = data[data.index.year <= 2024]
-    consistent_patterns = {}
-
-    for unique_id in historical_data['ID'].unique():
-        id_data = historical_data[historical_data['ID'] == unique_id].copy()
-        id_data['month'] = id_data.index.month
-        id_data['year'] = id_data.index.year
-
-        patterns = []
-
-        for period in [1, 2, 3]:
-            for start_month in range(1, 13 - period + 1):
-                months = [(start_month + i - 1) % 12 + 1 for i in range(period)]
-
-                yearly_trends = []
-                for year in id_data['year'].unique():
-                    values = id_data[(id_data['year'] == year) & (id_data['month'].isin(months))]['value']
-                    if len(values) == period:
-                        yearly_trends.append(values.values)
-
-                if len(yearly_trends) == len(id_data['year'].unique()):
-                    trend_diffs = [np.diff(year) for year in yearly_trends]
-                    if all(np.all(diff < 0) for diff in trend_diffs):
-                        patterns.append((start_month, period, "Decline"))
-                    elif all(np.all(diff > 0) for diff in trend_diffs):
-                        patterns.append((start_month, period, "Growth"))
-
-        consistent_patterns[unique_id] = patterns
-
-    return consistent_patterns
-
-def visualize_consistent_patterns(patterns, id_data, selected_id):
-    """
-    Visualize consistent patterns on historical data.
-    """
-    plt.figure(figsize=(12, 6))
-    plt.plot(id_data.index, id_data['value'], label='Value', marker='o')
-
-    for pattern in patterns:
-        start_month, period, trend_type = pattern
-        label = f"{trend_type} ({start_month}-{start_month + period - 1})"
-
-        for year in id_data['year'].unique():
-            months = [(start_month + i - 1) % 12 + 1 for i in range(period)]
-            indices = id_data[(id_data['year'] == year) & (id_data['month'].isin(months))].index
-            plt.plot(indices, id_data.loc[indices, 'value'], marker='o', label=label)
-
-    plt.title(f"Consistent Patterns for ID: {selected_id}")
-    plt.xlabel("Date")
-    plt.ylabel("Value")
-    plt.legend()
-    plt.grid()
-    st.pyplot(plt)
 
 def hybrid_model(data, actual_2025_values):
     # AutoARIMA model

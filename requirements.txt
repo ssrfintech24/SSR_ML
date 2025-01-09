@@ -1,0 +1,8 @@
+llama_index
+matplotlib
+pandas
+pmdarima
+scikit_learn
+streamlit--1.5.2
+xgboost
+numpy==1.26.4 
