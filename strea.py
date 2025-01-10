@@ -27,8 +27,7 @@ def tune_xgboost(X_train, y_train):
         'n_estimators': [50, 100, 200],
         'max_depth': [3, 5, 7],
         'learning_rate': [0.01, 0.1, 0.2],
-        'subsample': [0.6, 0.8, 1.0],
-        'colsample_bytree': [0.6, 0.8, 1.0],
+        'subsample': [0.8, 1.0]
     }
 
     xgb_model = XGBRegressor(random_state=42)
@@ -44,69 +43,14 @@ def tune_xgboost(X_train, y_train):
     grid_search.fit(X_train, y_train)
     return grid_search.best_estimator_, grid_search.best_params_
 
-def hybrid_model(data, actual_2025_values):
-    # AutoARIMA model
-    model = autoarima_model(data[data.index.year < 2025])  # Train till 2024
-    forecast = model.predict(n_periods=12)
-    fitted_values = model.predict_in_sample()
-
-    data['fitted_values'] = fitted_values
-    data['residual'] = data['value'] - data['fitted_values']
-
-    data['month'] = data.index.month
-    data['year'] = data.index.year
-    data['lag_1'] = data['value'].shift(1)
-    data['lag_2'] = data['value'].shift(2)
-    ml_data = data[data.index.year < 2025].dropna()
-
-    X = ml_data[['month', 'year', 'lag_1', 'lag_2']]
-    y = ml_data['residual']
-
-    # Train-Test Split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # Hyperparameter Tuning
-    st.write("Tuning XGBoost hyperparameters. This may take some time...")
-    best_xgb_model, best_params = tune_xgboost(X_train, y_train)
-    st.write(f"Best Parameters: {best_params}")
-
-    # Train XGBoost with the best parameters
-    best_xgb_model.fit(X_train, y_train)
-
-    # Predict Residuals for Future Dates
-    future_dates = pd.date_range(start=data.index[-1], periods=13, freq='M')[1:]
-    future_months = future_dates.month
-    future_years = future_dates.year
-
-    xgb_input = pd.DataFrame({
-        'month': future_months,
-        'year': future_years,
-        'lag_1': [data['value'].iloc[-1]] * 12,
-        'lag_2': [data['value'].iloc[-2]] * 12
-    })
-    xgb_residual_forecast = best_xgb_model.predict(xgb_input)
-
-    # Hybrid Forecast
-    hybrid_forecast = forecast + xgb_residual_forecast
-
-    # Create Forecast DataFrame
-    forecast_df = pd.DataFrame({
-        'Date': future_dates,
-        'AutoARIMA Forecast': forecast,
-        'XGBoost Residual Forecast': xgb_residual_forecast,
-        'Hybrid Forecast': hybrid_forecast,
-        'Actual Values': actual_2025_values
-    })
-
-    # Calculate MAPE
-    forecast_df['Error'] = abs(forecast_df['Hybrid Forecast'] - forecast_df['Actual Values'])
-    forecast_df['APE'] = (forecast_df['Error'] / forecast_df['Actual Values']) * 100
-    mape = forecast_df['APE'].mean()
-
-    return forecast_df, mape, data
+def calculate_mape(y_true, y_pred):
+    """
+    Calculate Mean Absolute Percentage Error (MAPE).
+    """
+    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
 
 # Streamlit App
-st.title("Forecasting Application with Hyperparameter Tuning and Pattern Analysis")
+st.title("Forecasting Application with Hybrid Model and Correlated IDs")
 st.write("Upload a CSV file to forecast values for 2025.")
 
 uploaded_file = st.file_uploader("Upload CSV file", type="csv")
@@ -115,53 +59,94 @@ if uploaded_file is not None:
     try:
         data = preprocess_data(uploaded_file)
 
-        # Get unique IDs
+        # Prepare the data
+        data['time'] = pd.to_datetime(data[['year', 'month']].assign(day=1))
+
+        # Dropdown to select the target ID
         unique_ids = data['ID'].unique()
+        target_id = st.selectbox("Select Target ID for Forecasting:", unique_ids)
 
-        # Select ID
-        selected_id = st.selectbox("Select ID to forecast:", unique_ids)
+        # Select correlated IDs
+        pivoted_data = data.pivot_table(index=['year', 'month'], columns='ID', values='value')
+        correlation_matrix = pivoted_data.corr()
+        highly_correlated_ids = correlation_matrix[target_id][correlation_matrix[target_id] >= 0.95].index.tolist()
+        if target_id in highly_correlated_ids:
+            highly_correlated_ids.remove(target_id)
+        correlated_ids = highly_correlated_ids
+        all_ids = [target_id] + correlated_ids
+        pivot_data = data.pivot(index='time', columns='ID', values='value')[all_ids]
 
-        # Filter data by selected ID
-        filtered_data = data[data['ID'] == selected_id]
+        # Feature Engineering
+        for col in pivot_data.columns:
+            pivot_data[f'{col}_lag1'] = pivot_data[col].shift(1)
+            pivot_data[f'{col}_lag2'] = pivot_data[col].shift(2)
+            pivot_data[f'{col}_rolling_mean3'] = pivot_data[col].rolling(window=3).mean()
+            pivot_data[f'{col}_exp_smooth'] = pivot_data[col].ewm(span=3, adjust=False).mean()
 
-        # Extract actual 2025 values
-        actual_2025_values = filtered_data.loc[filtered_data.index.year == 2025, 'value'].values
+        pivot_data.dropna(inplace=True)
 
-        if len(actual_2025_values) == 12:
-            forecast_df, mape, historical_data = hybrid_model(filtered_data, actual_2025_values)
+        # Separate training and testing data
+        train_data = pivot_data[pivot_data.index.year < 2025]
+        test_data = pivot_data[pivot_data.index.year == 2025]
 
-            st.write("### Forecast Results")
-            st.write(forecast_df)
+        X_train = train_data.drop(columns=[target_id])
+        y_train = train_data[target_id]
+        X_test = test_data.drop(columns=[target_id])
+        y_test = test_data[target_id]
 
-            # Display MAPE
-            st.write(f"### Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+        # AutoARIMA for baseline prediction
+        auto_arima_model = auto_arima(y_train, seasonal=True, m=6, trace=True, suppress_warnings=True)
+        y_pred_arima_train = auto_arima_model.predict_in_sample()
+        y_pred_arima_test = auto_arima_model.predict(n_periods=len(y_test))
 
-            # Plotting
-            plt.figure(figsize=(10, 6))
-            plt.plot(forecast_df['Date'], forecast_df['Actual Values'], label="Actual Values", marker="o")
-            plt.plot(forecast_df['Date'], forecast_df['Hybrid Forecast'], label="Hybrid Forecast", marker="o")
-            plt.title(f"Actual vs Forecasted Values for ID: {selected_id}")
-            plt.xlabel("Date")
-            plt.ylabel("Value")
-            plt.legend()
-            plt.grid()
-            st.pyplot(plt)
+        # Calculate residuals for training XGBoost
+        residuals_train = y_train - y_pred_arima_train
 
-            # Analyze recurring patterns
-            st.write("### Consistent Patterns")
-            consistent_patterns = identify_consistent_patterns(data)
-            if consistent_patterns[selected_id]:
-                st.write(f"Consistent Patterns for ID {selected_id}: {consistent_patterns[selected_id]}")
+        # XGBoost Training
+        xgb = XGBRegressor(random_state=42)
+        param_grid = {
+            'n_estimators': [50, 100, 200],
+            'max_depth': [3, 5, 7],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'subsample': [0.8, 1.0]
+        }
+        grid_search = GridSearchCV(estimator=xgb, param_grid=param_grid, cv=3, scoring='neg_mean_squared_error')
+        grid_search.fit(X_train, residuals_train)
 
-                # Visualize patterns
-                id_data = data[data['ID'] == selected_id]
-                visualize_consistent_patterns(consistent_patterns[selected_id], id_data, selected_id)
+        # Best model and prediction
+        best_xgb = grid_search.best_estimator_
+        y_pred_xgb_test = best_xgb.predict(X_test)
 
-            else:
-                st.write("No consistent patterns detected.")
+        # Combine predictions for final hybrid model
+        hybrid_predictions = y_pred_arima_test + y_pred_xgb_test
 
-        else:
-            st.error("The file must contain complete data for 2025 (12 months of actual values).")
+        # Evaluate the models
+        arima_rmse = mean_squared_error(y_test, y_pred_arima_test, squared=False)
+        xgb_rmse = mean_squared_error(y_test, y_pred_xgb_test, squared=False)
+        hybrid_rmse = mean_squared_error(y_test, hybrid_predictions, squared=False)
+
+        arima_mape = calculate_mape(y_test, y_pred_arima_test)
+        xgb_mape = calculate_mape(y_test, y_pred_xgb_test)
+        hybrid_mape = calculate_mape(y_test, hybrid_predictions)
+
+        # Display Results
+        st.write(f"### RMSE (AutoARIMA): {arima_rmse:.2f}")
+        st.write(f"### RMSE (XGBoost): {xgb_rmse:.2f}")
+        st.write(f"### RMSE (Hybrid Model): {hybrid_rmse:.2f}")
+        st.write(f"### MAPE (AutoARIMA): {arima_mape:.2f}%")
+        st.write(f"### MAPE (XGBoost): {xgb_mape:.2f}%")
+        st.write(f"### MAPE (Hybrid Model): {hybrid_mape:.2f}%")
+
+        # Plotting Results
+        plt.figure(figsize=(10, 6))
+        plt.plot(test_data.index, y_test, label="Actual Values", marker="o")
+        plt.plot(test_data.index, hybrid_predictions, label="Hybrid Forecast", marker="o")
+        plt.title(f"Actual vs Forecasted Values for ID: {target_id}")
+        plt.xlabel("Date")
+        plt.ylabel("Value")
+        plt.legend()
+        plt.grid()
+        st.pyplot(plt)
 
     except Exception as e:
         st.error(f"An error occurred: {e}")
